@@ -8,14 +8,17 @@ normal=$(tput sgr0)
 usage() {
   cat <<HELP
 ${bold}NAME${normal}
-       issue_cert.sh - creates a self-signed certificate for local development.
+    issue_cert.sh - creates a self-signed certificate for local development.
 
 ${bold}SYNOPSIS${normal}
-      ./issue_cert.sh [options]
+    ./issue_cert.sh [options]
 
 ${bold}OPTIONS${normal}
-     --domain name
-            Domain name including any subdomain for which an SSL certificate will be installed.
+    -d name
+      Domain name for which an SSL certificate will be installed. A wildcard domain name `*.name` will be registered as well.
+
+    -s subdomain
+      Add a subdomain. All subdomains will be resolved to localhost.
 HELP
 }
 
@@ -28,26 +31,33 @@ clean() {
     rootCA.key
 }
 
-# Call getopt to validate the provided input.
-options=$(getopt -o h -l domain:,help:: -- "$@")
-eval set -- "$options"
+# Resolve specified subdomains to localhost
+add_to_hosts() {
+  echo -e "127.0.0.1\t$DOMAIN" | sudo tee -a /etc/hosts
 
-while true; do
-    case "$1" in
-    --domain)
-      shift
-      DOMAIN="$1"
-      ;;
-    -h|--help)
-        usage
-        exit
-        ;;
-    --)
-        shift
-        break
-        ;;
+  for sub in "${SUBDOMAINS[@]}"; do
+    echo -e "127.0.0.1\t$sub.$DOMAIN" | sudo tee -a /etc/hosts
+  done
+}
+
+DOMAIN=
+SUBDOMAINS=( )
+
+while getopts hs:d: opt; do
+    case $opt in
+        h)
+            usage
+            exit 0
+            ;;
+        d)  DOMAIN=$OPTARG
+            ;;
+        s)  SUBDOMAINS+=( "$OPTARG" )
+            ;;
+        *)
+            usage >&2
+            exit 1
+            ;;
     esac
-    shift
 done
 
 if [ -z "$DOMAIN" ]; then
@@ -67,8 +77,8 @@ distinguished_name = dn
 [dn]
 C=GL
 L=None
-O=LocalDev
-OU=LocalDev
+O=Local-Dev
+OU=Local-Dev
 emailAddress=dummy@gmail.com
 CN=$DOMAIN
 CSR
@@ -86,8 +96,9 @@ V3
 
 set -e \
   && openssl req -x509 -new -nodes -key rootCA.key -sha256 -days 999 -out rootCA.pem \
-   -subj "/C=GL/ST=None/L=None/O=LocalDev/OU=LocalDev/CN=$DOMAIN" \
+   -subj "/C=GL/ST=None/L=None/O=Dev-$DOMAIN/OU=Dev-$DOMAIN/CN=$DOMAIN" \
   && openssl req -new -sha256 -nodes -out server.csr -newkey rsa:2048 -keyout server.key -config <( cat server.csr.cnf ) \
   && openssl x509 -req -in server.csr -CA rootCA.pem -CAkey rootCA.key -CAcreateserial -out server.crt -days 999 -sha256 -extfile v3.ext \
-  && openssl dhparam -out dhparam.pem 1024
+  && openssl dhparam -out dhparam.pem 1024 \
+  && add_to_hosts \
   && clean
