@@ -95,10 +95,11 @@ DNS.2 = *.$DOMAIN
 V3
 
 set -e \
-  && openssl req -x509 -new -nodes -key rootCA.key -sha256 -days 999 -out rootCA.pem \
+  && openssl req -x509 -new -nodes -key rootCA.key -sha256 -days 36500 -out rootCA.pem \
    -subj "/C=GL/ST=None/L=None/O=Dev-$DOMAIN/OU=Dev-$DOMAIN/CN=$DOMAIN" \
   && openssl req -new -sha256 -nodes -out server.csr -newkey rsa:2048 -keyout server.key -config <( cat server.csr.cnf ) \
   && openssl x509 -req -in server.csr -CA rootCA.pem -CAkey rootCA.key -CAcreateserial -out server.crt -days 999 -sha256 -extfile v3.ext \
   && openssl dhparam -out dhparam.pem 1024 \
+  && openssl x509 -outform der -in rootCA.pem -out rootCA.crt \
   && add_to_hosts \
   && clean
