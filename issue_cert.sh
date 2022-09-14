@@ -28,11 +28,12 @@ ${bold}OPTIONS${normal}
     ${bold}-v${normal} days
       Specifies how many days the issued certificate will be valid. Defaults to 36500 days.
 
-    ${bold}--ca-cert${normal}
-      Path to a CA certificate file.
+    ${bold}--root-ca${normal}
+      Path to a directory with the root certificate.
 
-    ${bold}--ca-key${normal}
-      Path to a CA key file.
+    ${bold}-t${normal}
+      Specifies a certificate type to issue. Allowed values: ( client | server | intermediate ). Defaults to server.
+      A root certificate will be generated unless --root-ca is provided.
 
     ${bold}--skip-hosts${normal}
 HELP
@@ -41,11 +42,12 @@ HELP
 DOMAIN=
 SUBDOMAINS=( )
 VALID_DAYS=36500
-CA_KEY=
-CA_CERT=
+ROOT_CA_KEY=
+ROOT_CA_CERT=
 KEY_LEN=2048
 SKIP_HOSTS=false
 OUT_DIR=
+CERT_TYPE=server
 
 # Resolve specified subdomains to localhost
 add_to_hosts() {
@@ -57,31 +59,70 @@ add_to_hosts() {
 }
 
 gen_private_key() {
-  CA_KEY="$OUT_DIR/rootCA.key"
-  openssl genrsa -des3 -out "$CA_KEY" $KEY_LEN >/dev/null
+  ROOT_CA_KEY="$OUT_DIR/rootCA.key"
+  openssl genrsa -des3 -out "$ROOT_CA_KEY" $KEY_LEN
 }
 
 gen_root_CA() {
-  CA_CERT="$OUT_DIR/rootCA.pem"
-  openssl req -x509 -new -nodes -key "$CA_KEY" -sha256 -days $VALID_DAYS -out "$CA_CERT" \
-    -subj "/C=GL/ST=None/L=Lehi/O=Byte, Inc./OU=IT/CN=$DOMAIN"
-  openssl x509 -outform der -in "$CA_CERT" -out "$OUT_DIR/rootCA.crt"
+  ROOT_CA_CERT="$OUT_DIR/rootCA.pem"
+  openssl req \
+    -x509 \
+    -new \
+    -nodes \
+    -key "$ROOT_CA_KEY" \
+    -sha256 \
+    -days $VALID_DAYS \
+    -config "$OUT_DIR/openssl.cfg" \
+    -extensions root_cert \
+    -out "$ROOT_CA_CERT" \
+    -subj "/C=GL/ST=None/L=Silicon Pit/O=Byte, Inc./OU=IT/CN=AgentCoop's Certificate Authority"
+  # Convert PEM to the crt format
+  openssl x509 -outform der -in "$ROOT_CA_CERT" -out "$OUT_DIR/rootCA.crt"
 }
 
 gen_dhparam() {
-  openssl dhparam -out dhparam.pem 2048
+  openssl dhparam -out dhparam.pem $KEY_LEN
+}
+
+prepare_cfg() {
+  local cfg="$OUT_DIR/openssl.cfg"
+  cp ./openssl.cfg $OUT_DIR/
+  sed -i "s/:DOMAIN:/$DOMAIN/g" $cfg
+  sed -i "s|:DIR:|$OUT_DIR|g" $cfg
 }
 
 issue_cert() {
-  create_csr && \
-  create_v3_ext && \
-  openssl req -new -sha256 -nodes -out "$OUT_DIR/$DOMAIN.csr" -newkey rsa:2048 -keyout "$OUT_DIR/cert-$DOMAIN.key" -config <( cat "$OUT_DIR/csr.cnf" ) && \
-  openssl x509 -req -in "$OUT_DIR/$DOMAIN.csr" -CA "$CA_CERT" -CAkey "$CA_KEY" \
-    -CAcreateserial -out "$OUT_DIR/cert-$DOMAIN.crt" -days $VALID_DAYS -sha256 -extfile "$OUT_DIR/v3.ext"
-  rm -f  "$OUT_DIR/$DOMAIN.csr"
+  create_csr
+  # Generate certificate sign request
+  openssl req \
+    -new \
+    -sha256 \
+    -nodes \
+    -out "$OUT_DIR/${CERT_TYPE}.csr" \
+    -newkey rsa:$KEY_LEN \
+    -keyout "$OUT_DIR/${CERT_TYPE}.key" \
+    -config <( cat "$OUT_DIR/csr.cnf" )
+  # Sign and issue certificate
+  openssl x509 \
+    -req \
+    -in "$OUT_DIR/${CERT_TYPE}.csr" \
+    -CA "$ROOT_CA_CERT" \
+    -CAkey "$ROOT_CA_KEY" \
+    -CAcreateserial \
+    -out "$OUT_DIR/${CERT_TYPE}.crt" \
+    -days $VALID_DAYS \
+    -sha256 \
+    -extfile "$OUT_DIR/openssl.cfg" \
+    -extensions "${CERT_TYPE}_cert"
+
   if [ "$SKIP_HOSTS" != "true" ]; then
     add_to_hosts
   fi
+}
+
+clean() {
+  rm -f "$OUT_DIR"/{rootCA.srl,csr.cnf,openssl.cfg}
+  rm -f "$OUT_DIR/${CERT_TYPE}.csr"
 }
 
 create_csr() {
@@ -131,22 +172,11 @@ CSR
 # msCodeCom              Microsoft Commercial Code Signing (authenticode)
 # msCTLSign              Microsoft Trust List Signing
 # msEFS                  Microsoft Encrypted File System
-create_v3_ext() {
-  cat > "$OUT_DIR/v3.ext" << V3
-basicConstraints = CA:FALSE
-keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
-extendedKeyUsage = critical, serverAuth, clientAuth
-subjectAltName = @alt_names
 
-[alt_names]
-DNS.1 = $DOMAIN
-DNS.2 = *.$DOMAIN
-V3
-}
 
 #
 # Call getopt to validate the provided input.
-options=$(getopt -o v:d:s:h --long ca-key: --long ca-cert: --long skip-hosts -- "$@")
+options=$(getopt -o v:d:s:t:h --long root-ca: --long skip-hosts -- "$@")
 [ $? -eq 0 ] || {
     echo "Incorrect options provided"
     exit 1
@@ -171,24 +201,25 @@ while true; do
         shift;
         DOMAIN=$1
         ;;
-    --ca-key)
+    --root-ca)
         shift;
-        CA_KEY=$1
-        [[ ! -f "$CA_KEY" ]] && {
-            echo "CA certificate $CA_KEY does not exists"
+        ROOT_CA_CERT=$(realpath "$1")/rootCA.pem
+        ROOT_CA_KEY=$(realpath "$1")/rootCA.key
+        [[ ! -f "$ROOT_CA_CERT" ]] && {
+            echo "Root CA certificate $ROOT_CA_CERT does not exist"
             exit 1
         }
-        ;;
-    --ca-cert)
-        shift;
-        CA_CERT=$1
-        [[ ! -f "$CA_CERT" ]] && {
-            echo "CA cetificate $CA_CERT does not exists"
+        [[ ! -f "$ROOT_CA_KEY" ]] && {
+            echo "Root CA key $ROOT_CA_KEY does not exist"
             exit 1
         }
         ;;
     --skip-hosts)
         SKIP_HOSTS=true
+        ;;
+    -t)
+        shift;
+        CERT_TYPE=$1
         ;;
     --)
         shift
@@ -207,21 +238,14 @@ fi
 OUT_DIR="./${DOMAIN}_cert-$(date +%Y-%d_%B_%H_%M)"
 mkdir -p $OUT_DIR
 
-if [[ -z "$CA_CERT" ]]; then
-  bold_ln "Generating CA key and certificate for ${DOMAIN}"
+prepare_cfg
+
+if [[ -z "$ROOT_CA_CERT" ]]; then
+  bold_ln "Generating root CA certificate and key"
   gen_private_key >/dev/null
   gen_root_CA >/dev/null
-else
-  [[ ! -f "$CA_CERT" ]] && {
-    echo "Private key file $CA_CERT does not exist"
-    rm -rf $OUT_DIR
-    exit 1
-  }
-  [[ ! -f "$CA_KEY" ]] && {
-    echo "CA certificate file $CA_KEY does not exist"
-    rm -rf $OUT_DIR
-    exit 1
-  }
 fi
 
-issue_cert >/dev/null
+issue_cert
+
+clean
